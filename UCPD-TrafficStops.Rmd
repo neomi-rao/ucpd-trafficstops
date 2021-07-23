@@ -1,0 +1,70 @@
+---
+title: "UCPD-TrafficStops"
+author: "Neomi Rao"
+date: "7/23/2021"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(tidyverse)
+library(rvest)
+library(stringr)
+library(purrr)
+library(lubridate)
+```
+
+## Scraping
+
+We will scrape the UCPD traffic stops webpage: 
+
+```{r}
+scrape_header <- function(URL){
+  doc <- read_html(URL)
+  header <- html_nodes(doc, "th") %>% 
+    html_text()
+  return(header)
+}
+
+header <- scrape_header(url1)
+
+scrape_rows <- function(URL){
+  doc <- read_html(URL)
+  #rows <- html_nodes(doc, "tr") %>% html_text()
+   
+  data <- html_nodes(doc, "td") %>%
+    html_text()
+  all_info <- list(table = table, data = data)
+  
+  return(all_info)
+}
+```
+
+Get the basic search result URL for the query - no pagination.
+```{r}
+# This URL will get cut-off in the knit PDF, not sure how to fix that.
+base_url = 
+"https://incidentreports.uchicago.edu/trafficStopsArchive.php?startDate=1433134800&endDate=1626843600"
+
+url1 = "https://incidentreports.uchicago.edu/trafficStopsArchive.php?startDate=1433134800&endDate=1626843600&offset=0"
+
+scrape_rows(url1)
+
+```
+
+Create a loop to scrape all of the pages (1062).
+Remove all of the "No traffic stops" entries
+Group the remaining items into sublists of 9 entries each (either using split or by adding a column with a common value to group by)
+Turn the list into a dataframe
+Add the headers
+Export to CSV 
+
+## Including Plots
+
+You can also embed plots, for example:
+
+```{r pressure, echo=FALSE}
+plot(pressure)
+```
+
+Note that the `echo = FALSE` parameter was added to the code chunk to prevent printing of the R code that generated the plot.
