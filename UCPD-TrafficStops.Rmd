@@ -12,12 +12,21 @@ library(rvest)
 library(stringr)
 library(purrr)
 library(lubridate)
+library(data.table)
 ```
 
 ## Scraping
+Get the basic search result URL for the query - no pagination. Also the URL for the first page.
+```{r}
+# This URL will get cut-off in the knit PDF, not sure how to fix that.
+base_url = 
+"https://incidentreports.uchicago.edu/trafficStopsArchive.php?startDate=1433134800&endDate=1626843600"
+
+url1 = "https://incidentreports.uchicago.edu/trafficStopsArchive.php?startDate=1433134800&endDate=1626843600&offset=0"
+
+```
 
 We will scrape the UCPD traffic stops webpage: 
-
 ```{r}
 scrape_header <- function(URL){
   doc <- read_html(URL)
@@ -31,40 +40,392 @@ header <- scrape_header(url1)
 scrape_rows <- function(URL){
   doc <- read_html(URL)
   #rows <- html_nodes(doc, "tr") %>% html_text()
+  #table <- html_nodes(doc, "table") %>% html_text()
    
   data <- html_nodes(doc, "td") %>%
     html_text()
-  all_info <- list(table = table, data = data)
   
-  return(all_info)
+  return(data)
 }
-```
 
-Get the basic search result URL for the query - no pagination.
-```{r}
-# This URL will get cut-off in the knit PDF, not sure how to fix that.
-base_url = 
-"https://incidentreports.uchicago.edu/trafficStopsArchive.php?startDate=1433134800&endDate=1626843600"
-
-url1 = "https://incidentreports.uchicago.edu/trafficStopsArchive.php?startDate=1433134800&endDate=1626843600&offset=0"
-
+#test
 scrape_rows(url1)
-
 ```
 
-Create a loop to scrape all of the pages (1062).
+Create a function/loop to scrape all of the pages (1062).
+```{r}
+#resultdf <- data.frame()
+resultlist = list()
+
+i=0
+n=1
+repeat {
+  url <- str_c(base_url, '&offset=', i)
+  
+  resultlist[n] <- map(url, scrape_rows)
+  
+  if (i>5300) break
+  
+  i = i+5
+  n = n+1 
+
+}
+resultlist[2]
+#resultlist[1063] <- NULL
+
+save(resultlist, file = "rawUCPDlist.RData")
+```
+
 Remove all of the "No traffic stops" entries
-Group the remaining items into sublists of 9 entries each (either using split or by adding a column with a common value to group by)
-Turn the list into a dataframe
-Add the headers
-Export to CSV 
-
-## Including Plots
-
-You can also embed plots, for example:
-
-```{r pressure, echo=FALSE}
-plot(pressure)
+```{r}
+datalist <- resultlist[!str_detect(resultlist,pattern="traffic stops|Traffic Stops|no incidents|no traf")]
+#datalist[800]
 ```
 
-Note that the `echo = FALSE` parameter was added to the code chunk to prevent printing of the R code that generated the plot.
+Create dataframe from list and add headers (right now there are 5 duplicate sets of columns)
+```{r}
+#try making into df
+df_raw <- data.frame(Reduce(rbind, datalist))
+
+header_mult <- c(header, header, header, header, header)
+colnames(df_raw) <- header_mult
+```
+
+Create the dataframe with right dimensions.
+```{r}
+df_new <- melt(setDT(df_raw), 
+               measure = patterns("^Date/Time", "^Location", "^Race", "^Gender", "^IDOT", "^Reason", "^Citations", "^Disposition", "^Search"),
+               value.name = header)[, variable := NULL][]
+
+```
+
+Export to CSV 
+```{r}
+write.csv(df_new, "UCPD_rawtrafficdata.csv", row.names = F)
+```
+
+##Clean Data
+
+Standardize Race, Gender, IDOT Classifications, Disposition, Search.
+Make Date into correct data type.
+```{r}
+unique(df_clean$Race)
+
+df_clean <- df_new %>%
+  mutate(Race=case_when(
+        str_detect(Race, "African") ~ "African American",
+        str_detect(Race, regex("^Asian", ignore_case = T)) ~ "Asian",
+        str_detect(Race, regex("Caucasian", ignore_case = T)) ~ "Caucasian",
+        str_detect(Race, regex("American Indian", ignore_case = T)) ~ 
+          "American Indian/Alaskan Native",
+        str_detect(Race, regex("Hispanic", ignore_case = T)) ~ "Hispanic",
+        str_detect(Race, regex("Native Hawaiian", ignore_case = T)) ~ 
+          "Native Hawaiian/Other Pacific Islander"),
+         Gender=case_when(
+        str_detect(Gender, regex("female", ignore_case = T)) ~ "Female",
+        str_detect(Gender, regex("male", ignore_case = T)) ~ "Male"),
+         `IDOT Classification`=case_when(
+        str_detect(`IDOT Classification`, "oving") ~ "Moving Violation - Other",
+        str_detect(`IDOT Classification`, "icense") ~ "License Plate/Registration",
+        str_detect(`IDOT Classification`, "Traffic") ~ "Traffic Sign/Signal",
+        str_detect(`IDOT Classification`, "ane ") ~ "Lane Violation",
+        str_detect(`IDOT Classification`, "Speed") ~ "Speed",
+        str_detect(`IDOT Classification`, "Equipment") ~ "Equipment",
+        str_detect(`IDOT Classification`, "Seat") ~ "Seatbelt",
+        str_detect(`IDOT Classification`, "Follow") ~ "Follow Too Close",
+        str_detect(`IDOT Classification`, "Disobeyed") ~ "Traffic Sign/Signal",
+        str_detect(`IDOT Classification`, "Failure to Yield") ~ "Moving Violation - Other"),
+        Disposition=case_when(
+          str_detect(Disposition, "erbal") ~ "Verbal Warning",
+          str_detect(Disposition, "Citation") ~ "Citation Issued",
+          str_detect(Disposition, "Arrest") ~ "Arrest"),
+        Search=case_when(
+          str_detect(Search, regex("no", ignore_case = T)) ~ "NO",
+        str_detect(Search, regex("yes", ignore_case = T)) ~ "YES"),
+        `Date/Time`= str_replace_all(`Date/Time`, c("/20019" = "/2019", 
+                                                    "/20020" = "/2020",
+                                                    "/200 " = "/2020 ",
+                                                    "52018" = "5/2018",
+                                                    "/22018" = "/2018")),
+        Location = str_replace(Location, regex("block of", ignore_case = T), ""),
+        ADD = str_c(Location, ", Chicago IL")
+        )
+
+df_clean$Date_Time <- parse_date_time(x=df_clean$`Date/Time`,
+                                  orders = c("%m/%d/%Y %H:%M", "%m/%d/%y %H:%M"), 
+                                             tz=Sys.timezone())
+
+#df_clean_na <- df_clean[is.na(df_clean$Date_Time), ]
+table(df_clean$Race)
+```
+
+Standardize location and create new columns with lat/long using Google Maps API
+```{r}
+#df_slice <- slice_head(df_clean, n = 20)
+library(ggmap)
+register_google(key = "AIzaSyDcJaf423dDqPBcG_WEo7Ad35eSM-cpjMw")
+
+```
+```{r}
+df_longlat <- df_clean %>%
+  mutate_geocode(location = ADD, output = "latlona")
+
+#df_longlat_na <- df_longlat[rowSums(is.na(df_longlat)) > 0, ]
+
+#clean up NAs
+df_longlat <- df_longlat %>%
+  filter(!is.na(address))
+```
+
+## Get Spatial Data
+```{r}
+library(sf)
+library(tmap)
+library(leaflet)
+```
+
+We will create a single row df for UofC location. 
+41.790322593911334, -87.6007669898823
+```{r}
+uofc <- data.frame("Name" = c("University of Chicago\nMain Campus"), "Location" = c("5801 S. Ellis Ave, Chicago IL 6037"), "lat" = c(41.790322593911334), "lon" = c(-87.6007669898823))
+
+uofc.pts <- st_as_sf(uofc, coords = c("lon","lat"), crs = 4326, remove = FALSE)
+st_write(uofc.pts, "uofcpts.shp")
+```
+
+
+Convert lat/long data to shapefile point data
+```{r}
+ucpd.pts <- st_as_sf(df_longlat, coords = c("lon","lat"), crs = 4326, remove = FALSE)
+#test by plotting
+#plot(ucpd.pts)
+#save shapefile
+st_write(ucpd.pts,"ucpd_trafficstops_latlon.shp")
+```
+
+Get Chicago tract-level & block-level boundary shapefiles
+```{r}
+chi_tracts <- st_read("Boundaries - Census Tracts - 2010/geo_export_148abfca-7b11-4264-9611-771793730e0d.shp")
+
+chi_blocks <- st_read("Boundaries - Census Blocks - 2010/geo_export_fdb3b142-b151-4a20-be0f-9eb891ac266b.shp")
+```
+
+Overlay points and polygons to check
+```{r}
+## 1st layer - tract polygons (gets plotted first)
+tm_shape(chi_tracts) + tm_borders(alpha = 0.4) + 
+  ## 2nd layer (overlay)
+  tm_shape(ucpd.pts) + tm_dots(size = 0.1, col="red") 
+```
+
+Check CRS of shapefiles - transform to match them.
+```{r}
+st_crs(ucpd.pts) 
+st_crs(chi_tracts)
+#transform
+CRS.new <- st_crs(chi_tracts)
+ucpd.pts <- st_transform(ucpd.pts, CRS.new)
+
+# create a tracts shapefile for the Hyde Park area only
+chi_tracts_hp <- chi_tracts %>%
+  filter(commarea_n %in% (36:42))
+
+# create a blocks shapefile for the Hyde Park area only
+chi_blocks_hp <- chi_blocks %>%
+  filter(tractce10 %in% chi_tracts_hp$tractce10)
+```
+
+Spatial join of UCPD traffic stops and tracts / blocks
+```{r}
+#unique(ucpd_in_tract$commarea_n)
+#ucpd_in_tract[is.na(ucpd_in_tract$commarea_n), ]
+
+#tract level
+ucpd_in_tract <- ucpd.pts %>% 
+  st_join(chi_tracts_hp, join = st_within) %>%
+  filter(commarea_n %in% (36:42))
+
+#glimpse(ucpd_in_tract)
+
+ucpd_in_block <- ucpd.pts %>% 
+  st_join(chi_blocks_hp, join = st_within) %>%
+  filter(tractce10 %in% chi_tracts_hp$tractce10)
+
+st_write(ucpd_in_block, "ucpdstops_byblock.shp")
+st_write(ucpd_in_tract, "ucpdstops_bytract.shp")
+```
+
+## Visualization - Traffic Stop Data Only 
+```{r}
+library(raster) # Needed for grid and kernel density surface
+library(adehabitatHR) # Needed for kernel density surface
+tiles="http://a.tiles.wmflabs.org/bw-mapnik/{z}/{x}/{y}.png"
+tmap_mode("plot")
+```
+
+Bounding box for UCPD traffic stop area
+```{r}
+ucpdtract.sp <- sf:::as_Spatial(ucpd_in_tract)
+hptracts.sp <- sf:::as_Spatial(chi_tracts_hp)
+bounding_box <- bbox(hptracts.sp)
+```
+
+### Dot map by block
+Color-coded dot map by race.
+```{r dotmap, echo=FALSE}
+tm_basemap(server=tiles) + #only works in view mode
+tm_shape(chi_blocks_hp) + tm_borders(alpha=.4) +
+  tm_shape(ucpd_in_block) + 
+  tm_dots(col = "Race", scale = 1.2, palette = "Dark2", title = "Race of Stopped Person")  +
+  tm_layout(title = "UCPD Traffic Stops\n(2016-2021)",
+            legend.text.size = 0.7, legend.title.size = 1.1, frame = FALSE, legend.outside = TRUE) 
+
+```
+
+Count buffers of traffic stops (by block)
+```{r}
+# Create 100m buffers for each traffic stop
+stop_buffers <- st_buffer(ucpd.pts, 100)
+count_buffers <- lengths(st_intersects(chi_blocks_hp, stop_buffers))
+count_buffers <- replace(count_buffers, count_buffers == 0, NA)
+
+ucpd_tract_buffers <- cbind(chi_blocks_hp,count_buffers)
+st_write(ucpd_tract_buffers,"ucpd_buffers_block.shp")
+```
+```{r}
+# Map density of buffers per census area
+tm_shape(ucpd_tract_buffers) + tm_borders(alpha=.4) +
+  tm_fill(col = "count_buffers", palette = "BuGn", style = "jenks",
+          title = "Traffic Stop Density by Block") +
+  tm_shape(uofc.pts) + tm_dots(size = 0.15, shape = 23, col="yellow") +
+  tm_layout(title = "UCPD Traffic Stops\n(2016-2021)",
+            legend.text.size = 0.7, legend.title.size = 1.1, frame = FALSE, legend.outside = TRUE) + 
+  tm_add_legend(type = "symbol", labels = "University of Chicago", col = "yellow", size = .4, shape = 23)
+```
+
+
+## Visualization - Add Layers
+###Census API
+Load census data
+```{r}
+library(tidycensus)
+
+CENSUSKEY = "9ee1a9031433a75a7ed513d6c6e481f7e72677cc"
+census_api_key(CENSUSKEY, install=TRUE, overwrite = TRUE)
+ACS15var <- load_variables(2015, "acs5", cache = TRUE)
+```
+
+Access census estimates ("B19013_001" = median income, "B02008_001" = white)
+```{r}
+cook_tract_inc.sp <- get_acs(geography = "tract", 
+              variables = c("B19013_001"), 
+              state = "IL", county = "Cook",
+              year = 2015, geometry = TRUE)
+
+cook_tract_inc <- get_acs(geography = "tract", 
+              variables = c("B19013_001"), 
+              state = "IL", county = "Cook",
+              year = 2015, geometry = FALSE)
+
+cook_tract_race.sp <- get_acs(geography = "tract", 
+              variables = c("B02008_001"), 
+              state = "IL", county = "Cook",
+              year = 2015, geometry = TRUE)
+
+cook_tract_race <- get_acs(geography = "tract", 
+              variables = c("B02008_001"), 
+              state = "IL", county = "Cook",
+              year = 2015, geometry = FALSE)
+
+# block level data is only available from the 10 year census - and only for race
+cook_block_race.sp <- get_decennial(geography = "block", 
+                      variables = c("P003002"), 
+                      year      = 2010,
+                      state     = "IL", 
+                      county    = "Cook", 
+                      geometry  =  TRUE)
+
+cook_block_race <- get_decennial(geography = "block", 
+                      variables = c("P003002"), 
+                      year      = 2010,
+                      state     = "IL", 
+                      county    = "Cook", 
+                      geometry  =  FALSE)
+
+#total population by block
+cook_b_pop <- get_decennial(geography = "block", 
+                      variables = c("P001001"), 
+                      year      = 2010,
+                      state     = "IL", 
+                      county    = "Cook", 
+                      geometry  =  FALSE)
+
+```
+Race and income data for local areas only - merge.
+```{r}
+race_tracts_hp <- chi_tracts_hp %>%
+  left_join(cook_tract_race, by = c("geoid10" = "GEOID"))
+
+income_tracts_hp <- chi_tracts_hp %>%
+  left_join(cook_tract_inc, by = c("geoid10" = "GEOID"))
+
+race_blocks_hp <- chi_blocks_hp %>%
+  left_join(cook_block_race, by = c("geoid10" = "GEOID")) %>%
+  left_join(cook_b_pop, by = c("geoid10" = "GEOID")) %>%
+  mutate(pct_white = value.x/value.y)
+
+st_write(race_blocks_hp,"census_race_block.shp")
+st_write(income_tracts_hp,"census_inc_tract.shp")
+```
+
+
+
+Quick plots of census data
+```{r}
+#cook_tr_r.sp <- table(cook_tract_race.sp$geometry)
+
+tm_shape(race_tracts_hp) + 
+  tm_fill("estimate", palette = "Oranges", style = "jenks", title ="White Population") +
+  tm_layout(legend.text.size = .6, legend.title.size = 1.0, 
+            legend.position = c("left", "bottom"), frame = FALSE)
+```
+
+```{r}
+tm_shape(race_blocks_hp) + 
+  tm_fill("pct_white", palette = "Oranges", style = "jenks", title ="% White Population") +
+  tm_layout(legend.text.size = .6, legend.title.size = 1.0, 
+            legend.position = c("left", "bottom"), frame = FALSE)
+```
+
+```{r}
+tm_shape(income_tracts_hp) + 
+  tm_fill("estimate", palette = "Greens", style = "jenks", title ="Median Income ($)") +
+  tm_layout(legend.text.size = .6, legend.title.size = 1.0, legend.outside = T, 
+            frame = FALSE)
+```
+
+### Kernel density
+```{r}
+# compute homeranges for 75%, 50%, 25% of points, objects are returned as spatial polygon data frames
+kde.output <- kernelUD(ucpdtract.sp, h="href", grid = 1000)
+
+range75 <- getverticeshr(kde.output, percent = 75)
+range50 <- getverticeshr(kde.output, percent = 50)
+range25 <- getverticeshr(kde.output, percent = 25)
+```
+
+Graph income by tract + UCPD stops kernel density
+```{r}
+tmap_options(check.and.fix = TRUE)
+
+tm_shape(income_tracts_hp) + tm_fill("estimate", palette = "Greens", style = "jenks", title ="Median Income ($)") + tm_borders(alpha=.8, col = "white") +
+  tm_shape(range75) + tm_borders(alpha=.7, col = "#fb6a4a", lwd = 2) + tm_fill(alpha=.1, col = "#fb6a4a") +
+  tm_shape(range50) + tm_borders(alpha=.7, col = "#de2d26", lwd = 2) + tm_fill(alpha=.1, col = "#de2d26") +
+  tm_shape(range25) + tm_borders(alpha=.7, col = "#a50f15", lwd = 2) + tm_fill(alpha=.1, col = "#a50f15") +
+  tm_layout(title = "UCPD Stop Density & Income by Tract", frame = FALSE) +
+  tm_add_legend(type = "fill", labels = c("75%", "50%", "25%"), col = c("#fb6a4a", "#de2d26", "#a50f15"), title = "Housing Kernel Density") 
+
+```
+
+
+
